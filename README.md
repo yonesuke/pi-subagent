@@ -15,7 +15,17 @@ The key improvement: **dynamic model selection**.
 | You need to edit `.md` files to change models | You pick models through pi's interactive picker, just like `/model` |
 | Can't reuse the same agent definition with different models | You can assign different models per-agent, remembered for the session |
 
-When an agent is invoked without an explicit model, pi prompts you with a model picker (listing all available models with configured auth). The selection is remembered for that agent for the rest of the session.
+When an agent is invoked without an explicit model, pi prompts you with a **scrollable model picker** (SelectList with 10 visible items, overlay). The picker shows models in this order:
+
+1. **★ Last used** for this agent (persisted across sessions)
+2. **Current** model in the main conversation
+3. All other available models
+
+You can **type to filter** with substring matching — typing `sonnet` matches `openrouter/anthropic/claude-sonnet-4-5`. Arrow keys navigate, Enter selects, Esc cancels.
+
+The picker appears **once per user prompt** (turn). Subsequent calls to the same agent within the same turn reuse the model without prompting. The selection is remembered for the next turn as the "last used" default.
+
+**Nested subagents** (e.g., chain mode) automatically inherit the parent's model — no picker shown in subprocesses.
 
 ## Features
 
@@ -25,7 +35,7 @@ When an agent is invoked without an explicit model, pi prompts you with a model 
   - **Parallel:** `{ tasks: [...] }` — up to 8 tasks, 4 concurrent
   - **Chain:** `{ chain: [...] }` — sequential with `{previous}` placeholder
 - **Streaming output** — See tool calls and progress as they happen
-- **Dynamic model picker** — Pick a model per-agent at invocation time
+- **Dynamic model picker** — Scrollable overlay with type-to-filter, per-turn reset, nested inheritance
 - **Per-agent tool restrictions** — Limit which tools each agent can use
 - **Usage tracking** — Shows turns, tokens, cost per agent
 - **Abort support** — Ctrl+C propagates to kill subagent processes
@@ -76,7 +86,7 @@ Run scouts in parallel: one to find model definitions, one to find provider conf
 Chain: scout finds auth code → planner creates implementation plan → worker implements the plan
 ```
 
-### Workflow prompts (if installed)
+### Work### Workflow prompts (if installed)
 ```
 /implement add Redis caching to the session store
 /scout-and-plan refactor auth to support OAuth
@@ -112,10 +122,17 @@ None of them have a hardcoded model — you'll be prompted to pick one the first
 ### How model selection works
 
 1. **Agent has `model` field** → Uses that model directly (no prompt).
-2. **No `model` field, but previously picked** → Reuses the remembered model (no prompt).
-3. **No `model` field, first time this session** → Shows you a model picker with all available models. The currently active model is pre-selected as default.
+2. **Nested subagent** (subagent spawned by another subagent) → Inherits the parent's model automatically.
+3. **Already picked this turn** → Reuses the model (no prompt). Pickers reset each user prompt.
+4. **First time this turn, no UI** → Falls back to the current model.
+5. **First time this turn, interactive** → Shows the picker overlay with:
+   - **★ Last used** model for this agent at the top
+   - **Current** model second
+   - All others below
 
-The mapping is stored in the session and survives `/reload`. To change an agent's model mid-session, simply edit the agent `.md` file to add a `model` field temporarily, or add the `model` field permanently.
+**Persistence:** The "last used" mapping lives in `~/.pi/agent/subagent-models.json` (survives restarts). You can `cat` or edit it directly. To force a model for an agent, add `model: provider/id` to its `.md` file.
+
+**Filter:** Type any substring — it matches against both the model ID and display name. `sonnet` catches all Claude Sonnet variants regardless of provider prefix. Backspace clears the filter.
 
 ## Tool modes
 
@@ -147,6 +164,9 @@ pi-subagent/
     ├── implement.md
     ├── scout-and-plan.md
     └── implement-and-review.md
+
+Runtime files (created automatically):
+~/.pi/agent/subagent-models.json  # Per-agent model history
 ```
 
 ## Acknowledgements

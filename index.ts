@@ -127,7 +127,7 @@ async function resolveModel(
 	}
 
 	const selected = await ctx.ui.custom<string | null>(
-		(_tui, theme, _kb, done) => {
+		(tui, theme, _kb, done) => {
 			const container = new Container();
 
 			// Top border
@@ -157,14 +157,18 @@ async function resolveModel(
 			selectList.onCancel = () => done(null);
 			container.addChild(selectList);
 
-			// Help text
-			container.addChild(
-				new Text(
-					theme.fg("dim", "↑↓ navigate  •  enter select  •  esc cancel  •  type to filter"),
-					1,
-					0,
-				),
+			// ── Type-to-filter support ──
+			// SelectList only handles arrow keys / enter / esc natively.
+			// We intercept printable chars and backspace to drive setFilter().
+			let filterText = "";
+
+			// Help text (updated dynamically to show filter)
+			const helpText = new Text(
+				theme.fg("dim", "↑↓ navigate  •  enter select  •  esc cancel  •  type to filter"),
+				1,
+				0,
 			);
+			container.addChild(helpText);
 
 			// Bottom border
 			container.addChild(
@@ -175,7 +179,34 @@ async function resolveModel(
 				render: (w: number) => container.render(w),
 				invalidate: () => container.invalidate(),
 				handleInput: (data: string) => {
+					// Printable ASCII (including space)
+					if (data.length === 1) {
+						const code = data.charCodeAt(0);
+						if (code >= 0x20 && code <= 0x7e) {
+							filterText += data;
+							selectList.setFilter(filterText);
+							helpText.setText(
+								theme.fg("dim", `filter: "${filterText}"  •  ↑↓ navigate  •  enter select  •  esc cancel  •  backspace clear`),
+							);
+							tui.requestRender();
+							return;
+						}
+						// Backspace (DEL or BS)
+						if (code === 0x7f || code === 0x08) {
+							filterText = filterText.slice(0, -1);
+							selectList.setFilter(filterText);
+							helpText.setText(
+								filterText
+									? theme.fg("dim", `filter: "${filterText}"  •  ↑↓ navigate  •  enter select  •  esc cancel  •  backspace clear`)
+									: theme.fg("dim", "↑↓ navigate  •  enter select  •  esc cancel  •  type to filter"),
+							);
+							tui.requestRender();
+							return;
+						}
+					}
+					// All other keys → SelectList (arrows, enter, esc, etc.)
 					selectList.handleInput(data);
+					tui.requestRender();
 				},
 			};
 		},

@@ -43,30 +43,18 @@ The picker appears **once per user prompt** (turn). Subsequent calls to the same
 ## Installation
 
 ```bash
-# 1. Clone this repo
-git clone https://github.com/yonesuke/pi-subagent.git
-cd pi-subagent
+# 1. Install the extension
+pi install git:github.com/yonesuke/pi-subagent
 
-# 2. Symlink the extension into pi's global extensions directory
-mkdir -p ~/.pi/agent/extensions/subagent
-# On macOS / Linux:
-ln -sf "$(pwd)/index.ts" ~/.pi/agent/extensions/subagent/index.ts
-ln -sf "$(pwd)/agents.ts" ~/.pi/agent/extensions/subagent/agents.ts
-
-# On Windows (PowerShell as admin if needed):
-New-Item -ItemType SymbolicLink -Path "$env:USERPROFILE\.pi\agent\extensions\subagent\index.ts" -Target "$(pwd)\index.ts"
-New-Item -ItemType SymbolicLink -Path "$env:USERPROFILE\.pi\agent\extensions\subagent\agents.ts" -Target "$(pwd)\agents.ts"
-
-# 3. Install agent definitions
+# 2. Install agent definitions (manual — copy to agents dir)
 mkdir -p ~/.pi/agent/agents
-cp agents/*.md ~/.pi/agent/agents/
+cp ~/.pi/agent/git/github.com/yonesuke/pi-subagent/agents/*.md ~/.pi/agent/agents/
 
-# 4. (Optional) Install workflow prompts
-mkdir -p ~/.pi/agent/prompts
-cp prompts/*.md ~/.pi/agent/prompts/
-
-# 5. Restart pi or run /reload inside pi
+# 3. /reload in pi, done!
 ```
+
+To update: `pi update --extensions`  (pulls latest commit).
+To uninstall: `pi remove git:github.com/yonesuke/pi-subagent`.
 
 ## Usage
 
@@ -152,18 +140,21 @@ None of them have a hardcoded model — you'll be prompted to pick one the first
 
 ```
 pi-subagent/
-├── README.md
-├── index.ts             # Extension entry point
-├── agents.ts            # Agent discovery logic
-├── agents/              # Sample agent definitions
+├── package.json                # pi package manifest
+├── extensions/
+│   └── subagent/
+│       ├── index.ts            # Extension entry point
+│       └── agents.ts           # Agent discovery logic
+├── agents/                     # Agent definitions (copy to ~/.pi/agent/agents/)
 │   ├── scout.md
 │   ├── planner.md
 │   ├── reviewer.md
 │   └── worker.md
-└── prompts/             # Workflow prompt templates
-    ├── implement.md
-    ├── scout-and-plan.md
-    └── implement-and-review.md
+├── prompts/                    # Workflow prompts (auto-loaded)
+│   ├── implement.md
+│   ├── scout-and-plan.md
+│   └── implement-and-review.md
+└── README.md
 
 Runtime files (created automatically):
 ~/.pi/agent/subagent-models.json  # Per-agent model history

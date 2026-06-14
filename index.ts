@@ -28,12 +28,13 @@ import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { Message } from "@earendil-works/pi-ai";
 import { StringEnum } from "@earendil-works/pi-ai";
 import {
+	DynamicBorder,
 	type ExtensionAPI,
 	type ExtensionContext,
 	getMarkdownTheme,
 	withFileMutationQueue,
 } from "@earendil-works/pi-coding-agent";
-import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
+import { Container, Markdown, type SelectItem, SelectList, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { type AgentConfig, type AgentScope, discoverAgents } from "./agents.ts";
 
@@ -74,7 +75,7 @@ async function restoreModelMapping(
  *   1. Agent definition has an explicit `model` field   → use it
  *   2. Previously picked model for this agent           → use it
  *   3. No interactive UI (print / json / RPC mode)      → fall back to current model
- *   4. Interactive: show a picker                       → user selects
+ *   4. Interactive: show a scroller picker (SelectList)  → user selects
  *
  * Returns the resolved model string ("provider/id") or undefined.
  */
@@ -95,23 +96,90 @@ async function resolveModel(
 		return ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
 	}
 
-	// 4. Interactive — show model picker
+	// 4. Interactive — show a SelectList-based model picker
 	const available = ctx.modelRegistry.getAvailable();
 	if (available.length === 0) return undefined;
 
-	// Build option list, starting with the current model as default
 	const currentId = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
-	// Put current model first if available, then the rest
-	const otherOptions = available
-		.map((m) => `${m.provider}/${m.id}`)
-		.filter((id) => id !== currentId);
-	const options = currentId && available.some((m) => `${m.provider}/${m.id}` === currentId)
-		? [currentId, ...otherOptions]
-		: otherOptions;
 
-	const selected = await ctx.ui.select(
-		`Pick model for "${agentName}"`,
-		options,
+	// Build SelectItems: put current model first if it exists in the list
+	const items: SelectItem[] = [];
+	let defaultIndex = 0;
+
+	if (currentId) {
+		const currentModel = available.find(
+			(m) => `${m.provider}/${m.id}` === currentId,
+		);
+		if (currentModel) {
+			items.push({
+				value: currentId,
+				label: currentId,
+				description: `current • ${currentModel.name}`,
+			});
+			defaultIndex = 0;
+		}
+	}
+
+	for (const m of available) {
+		const id = `${m.provider}/${m.id}`;
+		if (id === currentId) continue; // already added first
+		items.push({ value: id, label: id, description: m.name });
+	}
+
+	const selected = await ctx.ui.custom<string | null>(
+		(_tui, theme, _kb, done) => {
+			const container = new Container();
+
+			// Top border
+			container.addChild(
+				new DynamicBorder((s: string) => theme.fg("accent", s)),
+			);
+
+			// Title
+			container.addChild(
+				new Text(
+					theme.fg("accent", theme.bold(`Pick model for "${agentName}"`)),
+					1,
+					0,
+				),
+			);
+
+			// SelectList
+			const selectList = new SelectList(items, Math.min(items.length, 10), {
+				selectedPrefix: (t: string) => theme.fg("accent", t),
+				selectedText: (t: string) => theme.fg("accent", t),
+				description: (t: string) => theme.fg("muted", t),
+				scrollInfo: (t: string) => theme.fg("dim", t),
+				noMatch: (t: string) => theme.fg("warning", t),
+			});
+			selectList.setSelectedIndex(defaultIndex);
+			selectList.onSelect = (item) => done(item.value);
+			selectList.onCancel = () => done(null);
+			container.addChild(selectList);
+
+			// Help text
+			container.addChild(
+				new Text(
+					theme.fg("dim", "↑↓ navigate  •  enter select  •  esc cancel  •  type to filter"),
+					1,
+					0,
+				),
+			);
+
+			// Bottom border
+			container.addChild(
+				new DynamicBorder((s: string) => theme.fg("accent", s)),
+			);
+
+			return {
+				render: (w: number) => container.render(w),
+				invalidate: () => container.invalidate(),
+				handleInput: (data: string) => {
+					selectList.handleInput(data);
+				},
+			};
+		},
+		{ overlay: true },
 	);
 
 	if (selected) {

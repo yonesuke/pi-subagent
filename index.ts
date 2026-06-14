@@ -187,23 +187,38 @@ async function resolveModel(
 				),
 			);
 
-			// SelectList
-			const selectList = new SelectList(items, Math.min(items.length, 10), {
-				selectedPrefix: (t: string) => theme.fg("accent", t),
-				selectedText: (t: string) => theme.fg("accent", t),
-				description: (t: string) => theme.fg("muted", t),
-				scrollInfo: (t: string) => theme.fg("dim", t),
-				noMatch: (t: string) => theme.fg("warning", t),
-			});
-			selectList.setSelectedIndex(0);
-			selectList.onSelect = (item) => done(item.value);
-			selectList.onCancel = () => done(null);
-			container.addChild(selectList);
+			// ── Type-to-filter with substring matching ──
+			// SelectList.setFilter uses startsWith, which is too strict
+			// (typing "sonnet" won't match "openrouter/anthropic/claude-sonnet-4-5").
+			// We rebuild the SelectList on each keystroke with includes-filtered items.
 
-			// ── Type-to-filter support ──
-			// SelectList only handles arrow keys / enter / esc natively.
-			// We intercept printable chars and backspace to drive setFilter().
 			let filterText = "";
+
+			function buildSelectList(filtered: SelectItem[]) {
+				const sl = new SelectList(filtered, Math.min(filtered.length, 10), {
+					selectedPrefix: (t: string) => theme.fg("accent", t),
+					selectedText: (t: string) => theme.fg("accent", t),
+					description: (t: string) => theme.fg("muted", t),
+					scrollInfo: (t: string) => theme.fg("dim", t),
+					noMatch: (t: string) => theme.fg("warning", t),
+				});
+				sl.setSelectedIndex(0);
+				sl.onSelect = (item) => done(item.value);
+				sl.onCancel = () => done(null);
+				return sl;
+			}
+
+			function filterItems(all: SelectItem[], query: string): SelectItem[] {
+				const q = query.toLowerCase();
+				return all.filter(
+					(item) =>
+						item.value.toLowerCase().includes(q) ||
+						(item.description ?? "").toLowerCase().includes(q),
+				);
+			}
+
+			let selectList = buildSelectList(items);
+			container.addChild(selectList);
 
 			// Help text (updated dynamically to show filter)
 			const helpText = new Text(
@@ -227,9 +242,15 @@ async function resolveModel(
 						const code = data.charCodeAt(0);
 						if (code >= 0x20 && code <= 0x7e) {
 							filterText += data;
-							selectList.setFilter(filterText);
+							const filtered = filterItems(items, filterText);
+							container.removeChild(selectList);
+							selectList = buildSelectList(filtered);
+							container.addChild(selectList);
 							helpText.setText(
-								theme.fg("dim", `filter: "${filterText}"  •  ↑↓ navigate  •  enter select  •  esc cancel  •  backspace clear`),
+								theme.fg(
+									"dim",
+									`filter: "${filterText}" (${filtered.length})  •  ↑↓ navigate  •  enter select  •  esc cancel  •  backspace clear`,
+								),
 							);
 							tui.requestRender();
 							return;
@@ -237,11 +258,17 @@ async function resolveModel(
 						// Backspace (DEL or BS)
 						if (code === 0x7f || code === 0x08) {
 							filterText = filterText.slice(0, -1);
-							selectList.setFilter(filterText);
+							const filtered = filterItems(items, filterText);
+							container.removeChild(selectList);
+							selectList = buildSelectList(filtered);
+							container.addChild(selectList);
 							helpText.setText(
 								filterText
-									? theme.fg("dim", `filter: "${filterText}"  •  ↑↓ navigate  •  enter select  •  esc cancel  •  backspace clear`)
-									: theme.fg("dim", "↑↓ navigate  •  enter select  •  esc cancel  •  type to filter"),
+									? theme.fg(
+											"dim",
+											`filter: "${filterText}" (${filtered.length})  •  ↑↓ navigate  •  enter select  •  esc cancel  •  backspace clear`,
+										)
+									: theme.fg("dim", `↑↓ navigate  •  enter select  •  esc cancel  •  type to filter`),
 							);
 							tui.requestRender();
 							return;

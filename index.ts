@@ -195,7 +195,7 @@ async function resolveModel(
 				scrollInfo: (t: string) => theme.fg("dim", t),
 				noMatch: (t: string) => theme.fg("warning", t),
 			});
-			selectList.setSelectedIndex(defaultIndex);
+			selectList.setSelectedIndex(0);
 			selectList.onSelect = (item) => done(item.value);
 			selectList.onCancel = () => done(null);
 			container.addChild(selectList);

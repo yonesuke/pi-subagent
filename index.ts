@@ -45,26 +45,49 @@ const MAX_CONCURRENCY = 4;
 const COLLAPSED_ITEM_COUNT = 10;
 const PER_TASK_OUTPUT_CAP = 50 * 1024;
 
-// ── Per-agent model mapping (persisted via session entries) ─────────────
+// ── Model mapping ────────────────────────────────────────────────────
+//
+// Two layers:
+//   1. historicalMapping → JSON file at ~/.pi/agent/subagent-models.json
+//      Persists across sessions. Used as the "last used" default in pickers.
+//   2. perTurnMapping → in-memory, reset every before_agent_start (new user prompt).
+//      Ensures the picker shows at least once per turn; subsequent same-agent
+//      calls within the turn reuse the pick without prompting.
 
-const MODEL_MAPPING_ENTRY_TYPE = "subagent-model-mapping";
+const MODELS_JSON = path.join(os.homedir(), ".pi", "agent", "subagent-models.json");
 
-/**
- * In-memory cache of user-picked models, keyed by agent name.
- * Loaded from session on startup, updated on every pick.
- */
-let modelMapping: Record<string, string> = {};
+/** Models persisted across sessions — keyed by agent name. */
+let historicalMapping: Record<string, string> = {};
 
-async function restoreModelMapping(
-	entries: Iterable<{ type: string; customType?: string; data?: unknown }>,
-) {
-	modelMapping = {};
-	for (const entry of entries) {
-		if (entry.type === "custom" && entry.customType === MODEL_MAPPING_ENTRY_TYPE) {
-			// Take the latest mapping entry
-			const data = entry.data as Record<string, string> | undefined;
-			if (data) Object.assign(modelMapping, data);
+/** Models chosen within the current turn — keyed by agent name. Reset each turn. */
+let perTurnMapping: Record<string, string> = {};
+
+/** If set, we are running inside a nested subagent — inherit the parent's model. */
+const nestedModel: string | undefined = process.env.PI_SUBAGENT_MODEL || undefined;
+
+function loadHistoricalMapping(): void {
+	try {
+		if (fs.existsSync(MODELS_JSON)) {
+			const raw = fs.readFileSync(MODELS_JSON, "utf-8");
+			historicalMapping = JSON.parse(raw);
 		}
+	} catch {
+		historicalMapping = {};
+	}
+}
+
+function saveHistoricalMapping(): void {
+	try {
+		const dir = path.dirname(MODELS_JSON);
+		if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+		withFileMutationQueue(MODELS_JSON, async () => {
+			await fs.promises.writeFile(MODELS_JSON, JSON.stringify(historicalMapping, null, "\t") + "\n", {
+				encoding: "utf-8",
+				mode: 0o600,
+			});
+		});
+	} catch {
+		/* best-effort */
 	}
 }
 
@@ -73,9 +96,12 @@ async function restoreModelMapping(
  *
  * Order of precedence:
  *   1. Agent definition has an explicit `model` field   → use it
- *   2. Previously picked model for this agent           → use it
- *   3. No interactive UI (print / json / RPC mode)      → fall back to current model
- *   4. Interactive: show a scroller picker (SelectList)  → user selects
+ *   2. Nested subagent (PI_SUBAGENT_MODEL env)          → inherit parent model
+ *   3. Already picked in this turn for this agent        → reuse (no picker)
+ *   4. No interactive UI                                 → fall back to current model
+ *   5. Interactive: show a scroller picker (SelectList)  → user selects
+ *
+ * Picker order: historical (★) → current → all others.
  *
  * Returns the resolved model string ("provider/id") or undefined.
  */
@@ -83,46 +109,63 @@ async function resolveModel(
 	agentName: string,
 	agentModel: string | undefined,
 	ctx: ExtensionContext,
-	pi: ExtensionAPI,
+	_pi: ExtensionAPI,
 ): Promise<string | undefined> {
 	// 1. Agent has an explicit model override — use it
 	if (agentModel) return agentModel;
 
-	// 2. Previously remembered for this agent
-	if (modelMapping[agentName]) return modelMapping[agentName];
+	// 2. Nested subagent — inherit parent's model
+	if (nestedModel) return nestedModel;
 
-	// 3. No UI available — fall back to the current model
+	// 3. Already picked within this turn — reuse
+	if (perTurnMapping[agentName]) return perTurnMapping[agentName];
+
+	// 4. No UI available — fall back to the current model
 	if (!ctx.hasUI) {
 		return ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
 	}
 
-	// 4. Interactive — show a SelectList-based model picker
+	// 5. Interactive — show a SelectList-based model picker
 	const available = ctx.modelRegistry.getAvailable();
 	if (available.length === 0) return undefined;
 
 	const currentId = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
 
-	// Build SelectItems: put current model first if it exists in the list
+	// ── Build ordered items ──
+	//   a) historical (★ last used for this agent)
+	//   b) current model (if different from historical)
+	//   c) all others
 	const items: SelectItem[] = [];
-	let defaultIndex = 0;
+	const seen = new Set<string>();
 
-	if (currentId) {
-		const currentModel = available.find(
-			(m) => `${m.provider}/${m.id}` === currentId,
-		);
-		if (currentModel) {
-			items.push({
-				value: currentId,
-				label: currentId,
-				description: `current • ${currentModel.name}`,
-			});
-			defaultIndex = 0;
-		}
+	const historicalId = historicalMapping[agentName];
+	if (historicalId && available.some((m) => `${m.provider}/${m.id}` === historicalId)) {
+		const hm = available.find((m) => `${m.provider}/${m.id}` === historicalId)!;
+		items.push({
+			value: historicalId,
+			label: historicalId,
+			description: `★ last used  •  ${hm.name}`,
+		});
+		seen.add(historicalId);
+	}
+
+	if (
+		currentId &&
+		!seen.has(currentId) &&
+		available.some((m) => `${m.provider}/${m.id}` === currentId)
+	) {
+		const cm = available.find((m) => `${m.provider}/${m.id}` === currentId)!;
+		items.push({
+			value: currentId,
+			label: currentId,
+			description: `current  •  ${cm.name}`,
+		});
+		seen.add(currentId);
 	}
 
 	for (const m of available) {
 		const id = `${m.provider}/${m.id}`;
-		if (id === currentId) continue; // already added first
+		if (seen.has(id)) continue;
 		items.push({ value: id, label: id, description: m.name });
 	}
 
@@ -214,8 +257,9 @@ async function resolveModel(
 	);
 
 	if (selected) {
-		modelMapping[agentName] = selected;
-		pi.appendEntry(MODEL_MAPPING_ENTRY_TYPE, { ...modelMapping });
+		perTurnMapping[agentName] = selected;
+		historicalMapping[agentName] = selected;
+		saveHistoricalMapping();
 		return selected;
 	}
 
@@ -246,12 +290,12 @@ async function resolveAllModels(
 	agentNames: string[],
 	agents: AgentConfig[],
 	ctx: ExtensionContext,
-	pi: ExtensionAPI,
+	_pi: ExtensionAPI,
 ): Promise<Record<string, string>> {
 	const resolved: Record<string, string> = {};
 	for (const name of agentNames) {
 		const agent = agents.find((a) => a.name === name);
-		const model = await resolveModel(name, agent?.model, ctx, pi);
+		const model = await resolveModel(name, agent?.model, ctx, _pi);
 		if (model) resolved[name] = model;
 	}
 	return resolved;
@@ -583,10 +627,13 @@ async function runSingleAgent(
 
 		const exitCode = await new Promise<number>((resolve) => {
 			const invocation = getPiInvocation(args);
+			const env: Record<string, string> = { ...(process.env as Record<string, string>) };
+			if (resolvedModel) env.PI_SUBAGENT_MODEL = resolvedModel;
 			const proc = spawn(invocation.command, invocation.args, {
 				cwd: cwd ?? defaultCwd,
 				shell: false,
 				stdio: ["ignore", "pipe", "pipe"],
+				env,
 			});
 			let buffer = "";
 
@@ -731,9 +778,19 @@ const SubagentParams = Type.Object({
 // ── Extension entry point ───────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
-	// Restore per-agent model mapping from session on startup
-	pi.on("session_start", async (_event, ctx) => {
-		await restoreModelMapping(ctx.sessionManager.getEntries());
+	// ── Startup: load historical mapping from JSON file ───────────
+	loadHistoricalMapping();
+
+	// Reset per-turn mapping whenever a new user prompt starts.
+	// (Skip if we are a nested subagent — we just inherit the parent model.)
+	pi.on("before_agent_start", async () => {
+		if (!nestedModel) perTurnMapping = {};
+	});
+
+	// Also reload the JSON file when session is restored, in case
+	// it was edited externally between runs.
+	pi.on("session_start", async () => {
+		if (!nestedModel) loadHistoricalMapping();
 	});
 
 	pi.registerTool({
